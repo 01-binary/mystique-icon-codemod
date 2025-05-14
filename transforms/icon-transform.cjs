@@ -60,15 +60,15 @@ module.exports = function transformer(file, api) {
   // 2. 기존 <Icon ... /> JSXElement 변환
   root.findJSXElements(oldIconDefaultImportName).forEach((path) => {
     const { openingElement } = path.node;
-    let iconPropValue = null;
-    let colorPropExists = false;
+    let iconPropValue = null; // 정적 문자열 아이콘 이름용
+    let isUnhandledIconProp = false; // 문자열 리터럴이 아닌 경우
+
     const newAttributes = [];
 
     openingElement.attributes.forEach((attr) => {
       if (attr.type === 'JSXAttribute') {
         const attrName = attr.name.name;
         if (attrName === 'icon') {
-          // 'icon' prop 값 추출 (단순 문자열 리터럴만 처리)
           if (attr.value.type === 'StringLiteral') {
             iconPropValue = attr.value.value;
           } else if (
@@ -84,15 +84,9 @@ module.exports = function transformer(file, api) {
           ) {
             iconPropValue = attr.value.expression.quasis[0].value.cooked;
           } else {
-            // 동적 아이콘 이름 (예: `icon={`...${variable}`}`)은 자동 변환이 복잡하므로 경고.
-            console.warn(
-              `[SKIPPED] File: ${file.path} - Component <${oldIconDefaultImportName}> at line ${openingElement.loc.start.line} has a dynamic 'icon' prop that requires manual review.`
-            );
+            isUnhandledIconProp = true; // 문자열 리터럴이 아닌 모든 경우
           }
         } else {
-          if (attrName === 'color') {
-            colorPropExists = true;
-          }
           newAttributes.push(attr); // icon이 아닌 다른 속성은 그대로 추가
         }
       } else {
@@ -104,25 +98,29 @@ module.exports = function transformer(file, api) {
       const newComponentName = getNewIconComponentName(iconPropValue);
       importedIconNamesFromNewPackage.add(newComponentName);
 
-      // JSX 태그 이름 변경
       openingElement.name.name = newComponentName;
       if (path.node.closingElement) {
         path.node.closingElement.name.name = newComponentName;
       }
+      openingElement.attributes = newAttributes;
+    } else if (
+      isUnhandledIconProp ||
+      openingElement.name.name === oldIconDefaultImportName
+    ) {
+      // iconPropValue를 추출하지 못했거나, 처리할 수 없는 icon prop인 경우 경고
+      console.warn(
+        `[SKIPPED] File: ${file.path} - Component <${oldIconDefaultImportName}> at line ${openingElement.loc.start.line} has a dynamic or unhandled 'icon' prop that requires manual review.`
+      );
 
-      // color prop이 명시적으로 없었다면 'currentColor'로 설정
-      if (!colorPropExists) {
-        newAttributes.push(
-          j.jsxAttribute(
-            j.jsxIdentifier('color'),
-            j.stringLiteral('currentColor')
-          )
-        );
+      // 변환하지 않으므로, 원래 속성들(icon 포함)을 그대로 둡니다.
+      // 원래 icon prop을 newAttributes에 다시 추가해줘야 합니다. (openingElement.attributes에서 icon prop을 제외하고 newAttributes를 만들었기 때문)
+      const originalIconAttribute = openingElement.attributes.find(
+        (attr) => attr.type === 'JSXAttribute' && attr.name.name === 'icon'
+      );
+      if (originalIconAttribute) {
+        newAttributes.unshift(originalIconAttribute);
       }
-      openingElement.attributes = newAttributes; // 재구성된 속성으로 교체
-    } else if (openingElement.name.name === oldIconDefaultImportName) {
-      // iconPropValue를 추출하지 못했고, 아직 변환되지 않은 <Icon /> 태그인 경우
-      // (위에서 dynamic 'icon' prop 경고가 이미 출력되었을 수 있음)
+      openingElement.attributes = newAttributes;
     }
   });
 
@@ -146,15 +144,19 @@ module.exports = function transformer(file, api) {
       }
     });
 
-  // 4. 새로운 아이콘 컴포넌트들을 '@mystique/icons'에서 임포트
-  if (importedIconNamesFromNewPackage.size > 0) {
-    const newImportSpecifiers = Array.from(importedIconNamesFromNewPackage)
-      .sort()
-      .map((name) => j.importSpecifier(j.identifier(name)));
+  // 4. 새로운 아이콘 컴포넌트들을 '@3o3/mystique-icons'에서 임포트
+  const newSpecificImportSpecifiers = Array.from(
+    importedIconNamesFromNewPackage
+  )
+    .sort()
+    .map((name) => j.importSpecifier(j.identifier(name)));
 
+  const allNewImportSpecifiers = newSpecificImportSpecifiers;
+
+  if (allNewImportSpecifiers.length > 0) {
     const newImportDeclaration = j.importDeclaration(
-      newImportSpecifiers,
-      j.literal('@mystique/icons') // 새 패키지명
+      allNewImportSpecifiers,
+      j.literal('@3o3/mystique-icons') // 새 패키지명 (사용자 변경 사항 반영)
     );
 
     const body = root.get().node.program.body;
@@ -168,4 +170,4 @@ module.exports = function transformer(file, api) {
   }
 
   return root.toSource({ quote: 'single', trailingComma: true });
-}
+};
