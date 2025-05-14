@@ -1,6 +1,6 @@
 {
   "name": "mystique-icon-codemod",
-  "version": "0.1.1",
+  "version": "0.1.4",
   "description": "CLI tool to transform Mystique Icon components using jscodeshift",
   "type": "module",
   "bin": {
@@ -19,6 +19,7 @@
   "license": "ISC",
   "dependencies": {
     "chalk": "^5.4.1",
+    "execa": "^9.5.3",
     "jscodeshift": "^17.3.0",
     "yargs": "^17.7.2"
   },

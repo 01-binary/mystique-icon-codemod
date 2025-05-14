@@ -1,12 +1,12 @@
-// icon-transform.js
-import {
+// icon-transform.cjs
+const {
   ASTPath,
   ImportDeclaration,
   JSXAttribute,
   JSXElement,
   JSXIdentifier,
   JSXOpeningElement,
-} from 'jscodeshift';
+} = require('jscodeshift');
 
 // 아이콘 문자열을 PascalCase 컴포넌트 이름으로 변환하는 헬퍼 함수
 // 예: 'ic_basic_outline_chevron_left' -> 'OutlineChevronLeft'
@@ -31,7 +31,7 @@ function getNewIconComponentName(iconString) {
     .join('');
 }
 
-export default function transformer(file, api) {
+module.exports = function transformer(file, api) {
   const j = api.jscodeshift;
   const root = j(file.source);
 
