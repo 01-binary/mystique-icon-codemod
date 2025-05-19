@@ -1,12 +1,4 @@
 // icon-transform.cjs
-const {
-  ASTPath,
-  ImportDeclaration,
-  JSXAttribute,
-  JSXElement,
-  JSXIdentifier,
-  JSXOpeningElement,
-} = require('jscodeshift');
 
 // 아이콘 문자열을 PascalCase 컴포넌트 이름으로 변환하는 헬퍼 함수
 // 예: 'ic_basic_outline_chevron_left' -> 'OutlineChevronLeft'
@@ -35,20 +27,30 @@ module.exports = function transformer(file, api) {
   const j = api.jscodeshift;
   const root = j(file.source);
 
+  let fileHasSkippedIcons = false; // 파일 내에 건너뛴 아이콘이 있는지 추적
   let oldIconDefaultImportName = null;
   const importedIconNamesFromNewPackage = new Set();
 
-  // 1. 기존 '~/components/Icon' 임포트 찾기 및 Icon 컴포넌트의 기본 임포트 이름 저장
+  // 1. 기존 '@3o3/mystique-components' 임포트 찾기 및 Icon 컴포넌트의 기본 임포트 이름 저장
   root
     .find(j.ImportDeclaration, {
-      source: { value: '~/components/Icon' }, // 실제 경로 별칭에 맞게 수정 필요
+      source: { value: '@3o3/mystique-components' }, // 실제 경로 별칭에 맞게 수정 필요
     })
     .forEach((path) => {
-      const defaultSpecifier = path.node.specifiers.find(
-        (s) => s.type === 'ImportDefaultSpecifier'
-      );
-      if (defaultSpecifier) {
-        oldIconDefaultImportName = defaultSpecifier.local.name; // 예: 'Icon'
+      // Icon의 로컬 이름이 이전 import 문에서 이미 발견된 경우 중복 처리를 방지합니다.
+      if (oldIconDefaultImportName) {
+        return;
+      }
+      // 현재 import 문의 모든 specifier를 순회합니다.
+      for (const specifier of path.node.specifiers) {
+        // 'Icon'이라는 이름으로 명명된 임포트를 찾습니다 (예: import { Icon } 또는 import { Icon as MyIcon }).
+        if (
+          specifier.type === 'ImportSpecifier' &&
+          specifier.imported.name === 'Icon'
+        ) {
+          oldIconDefaultImportName = specifier.local.name; // 로컬 이름 ('Icon' 또는 'MyIcon')을 저장합니다.
+          break; // Icon을 찾았으므로 현재 import 문의 다른 specifier는 더 이상 확인할 필요가 없습니다.
+        }
       }
     });
 
@@ -111,6 +113,7 @@ module.exports = function transformer(file, api) {
       console.warn(
         `[SKIPPED] File: ${file.path} - Component <${oldIconDefaultImportName}> at line ${openingElement.loc.start.line} has a dynamic or unhandled 'icon' prop that requires manual review.`
       );
+      fileHasSkippedIcons = true; // 플래그 설정
 
       // 변환하지 않으므로, 원래 속성들(icon 포함)을 그대로 둡니다.
       // 원래 icon prop을 newAttributes에 다시 추가해줘야 합니다. (openingElement.attributes에서 icon prop을 제외하고 newAttributes를 만들었기 때문)
@@ -124,25 +127,25 @@ module.exports = function transformer(file, api) {
     }
   });
 
-  // 3. 기존 '~/components/Icon' 임포트 문 제거
-  root
-    .find(j.ImportDeclaration, {
-      source: { value: '~/components/Icon' },
-    })
-    .forEach((path) => {
-      const remainingSpecifiers = path.node.specifiers.filter((s) => {
-        return !(
-          s.type === 'ImportDefaultSpecifier' &&
-          s.local.name === oldIconDefaultImportName
-        );
-      });
+  // // 3. 기존 '~/components/Icon' 임포트 문 제거
+  // root
+  //   .find(j.ImportDeclaration, {
+  //     source: { value: '~/components/Icon' },
+  //   })
+  //   .forEach((path) => {
+  //     const remainingSpecifiers = path.node.specifiers.filter((s) => {
+  //       return !(
+  //         s.type === 'ImportDefaultSpecifier' &&
+  //         s.local.name === oldIconDefaultImportName
+  //       );
+  //     });
 
-      if (remainingSpecifiers.length === 0) {
-        j(path).remove();
-      } else {
-        path.node.specifiers = remainingSpecifiers;
-      }
-    });
+  //     if (remainingSpecifiers.length === 0) {
+  //       j(path).remove();
+  //     } else {
+  //       path.node.specifiers = remainingSpecifiers;
+  //     }
+  //   });
 
   // 4. 새로운 아이콘 컴포넌트들을 '@3o3/mystique-icons'에서 임포트
   const newSpecificImportSpecifiers = Array.from(
@@ -167,6 +170,30 @@ module.exports = function transformer(file, api) {
       }
     }
     body.splice(lastImportIndex + 1, 0, newImportDeclaration);
+  }
+
+  // 파일 최상단에 주석 추가 (만약 건너뛴 아이콘이 있었다면)
+  if (fileHasSkippedIcons) {
+    const topLevelCommentText = `// TODO: mystique-icon-codemod: This file contains <Icon> components that were skipped during transformation and require manual review. Please search for '[SKIPPED]' in your console logs for details.`;
+
+    const programNode = root.find(j.Program).get(0).node;
+    if (!programNode.comments) {
+      programNode.comments = [];
+    }
+
+    const alreadyHasFileLevelComment = programNode.comments.some((c) =>
+      c.value.includes(
+        'mystique-icon-codemod: This file contains <Icon> components'
+      )
+    );
+
+    if (!alreadyHasFileLevelComment) {
+      // j.commentLine의 두 번째 인자는 보통 isBlock, 세 번째는 isLeading이지만,
+      // recast가 Program 노드의 comments 배열 맨 앞에 추가된 주석을 파일 상단에 잘 배치해줍니다.
+      programNode.comments.unshift(
+        j.commentLine(topLevelCommentText.substring(3))
+      ); // '// ' 제외하고 내용만 전달
+    }
   }
 
   return root.toSource({ quote: 'single', trailingComma: true });
