@@ -64,6 +64,7 @@ module.exports = function transformer(file, api) {
     const { openingElement } = path.node;
     let iconPropValue = null; // 정적 문자열 아이콘 이름용
     let isUnhandledIconProp = false; // 문자열 리터럴이 아닌 경우
+    let hasSizeProp = false; // size 속성 확인용 플래그
 
     const newAttributes = [];
 
@@ -89,6 +90,9 @@ module.exports = function transformer(file, api) {
             isUnhandledIconProp = true; // 문자열 리터럴이 아닌 모든 경우
           }
         } else {
+          if (attr.type === 'JSXAttribute' && attr.name.name === 'size') {
+            hasSizeProp = true;
+          }
           newAttributes.push(attr); // icon이 아닌 다른 속성은 그대로 추가
         }
       } else {
@@ -103,6 +107,15 @@ module.exports = function transformer(file, api) {
       openingElement.name.name = newComponentName;
       if (path.node.closingElement) {
         path.node.closingElement.name.name = newComponentName;
+      }
+
+      if (!hasSizeProp) {
+        newAttributes.push(
+          j.jsxAttribute(
+            j.jsxIdentifier('size'),
+            j.jsxExpressionContainer(j.literal(20))
+          )
+        );
       }
       openingElement.attributes = newAttributes;
     } else if (
@@ -127,25 +140,30 @@ module.exports = function transformer(file, api) {
     }
   });
 
-  // // 3. 기존 '~/components/Icon' 임포트 문 제거
-  // root
-  //   .find(j.ImportDeclaration, {
-  //     source: { value: '~/components/Icon' },
-  //   })
-  //   .forEach((path) => {
-  //     const remainingSpecifiers = path.node.specifiers.filter((s) => {
-  //       return !(
-  //         s.type === 'ImportDefaultSpecifier' &&
-  //         s.local.name === oldIconDefaultImportName
-  //       );
-  //     });
+  // 3. 기존 '@3o3/mystique-components'에서 Icon 임포트 제거
+  root
+    .find(j.ImportDeclaration, {
+      source: { value: '@3o3/mystique-components' },
+    })
+    .forEach((path) => {
+      const originalSpecifiers = path.node.specifiers;
+      const remainingSpecifiers = originalSpecifiers.filter((s) => {
+        // oldIconDefaultImportName은 Icon 컴포넌트의 로컬 이름임 (예: Icon 또는 MyIcon)
+        // ImportSpecifier 타입이고 로컬 이름이 일치하는 경우 제거
+        return !(
+          s.type === 'ImportSpecifier' &&
+          s.local.name === oldIconDefaultImportName
+        );
+      });
 
-  //     if (remainingSpecifiers.length === 0) {
-  //       j(path).remove();
-  //     } else {
-  //       path.node.specifiers = remainingSpecifiers;
-  //     }
-  //   });
+      if (remainingSpecifiers.length === 0) {
+        // Icon 외 다른 임포트가 없으면 임포트 문 전체 제거
+        j(path).remove();
+      } else if (remainingSpecifiers.length < originalSpecifiers.length) {
+        // 다른 임포트가 남아있으면, Icon 임포트만 제거된 specifiers로 교체
+        path.node.specifiers = remainingSpecifiers;
+      }
+    });
 
   // 4. 새로운 아이콘 컴포넌트들을 '@3o3/mystique-icons'에서 임포트
   const newSpecificImportSpecifiers = Array.from(
