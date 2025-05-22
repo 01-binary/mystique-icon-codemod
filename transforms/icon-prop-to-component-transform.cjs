@@ -1,31 +1,40 @@
-// icon-prop-to-component-transform.cjs
-
-// 아이콘 문자열을 PascalCase 컴포넌트 이름으로 변환하는 헬퍼 함수
-function getNewIconComponentName(iconString) {
-  if (!iconString || typeof iconString !== 'string') {
-    return 'UnknownIcon';
-  }
-  let namePart = iconString;
-  if (namePart.startsWith('ic_basic_')) {
-    namePart = namePart.substring('ic_basic_'.length);
-  } else if (namePart.startsWith('ic_')) {
-    namePart = namePart.substring('ic_'.length);
-  }
-
-  const componentName = namePart
-    .split('_')
-    .map((part) => {
-      if (!part) return '';
-      return part.charAt(0).toUpperCase() + part.slice(1);
-    })
-    .join('');
-
-  return componentName || 'UnknownIcon';
-}
-
 module.exports = function transformer(file, api) {
+  // icon-prop-to-component-transform.cjs
+  function getNewIconComponentName(iconString) {
+    if (!iconString || typeof iconString !== 'string') {
+      return 'UnknownIcon'; // 또는 오류 처리
+    }
+    let namePart = iconString;
+    // 가장 긴/구체적인 접두사부터 순서대로 처리
+    if (namePart.startsWith('ic_basic_outline_')) {
+      namePart = namePart.substring('ic_basic_outline_'.length);
+    } else if (namePart.startsWith('ic_outline_')) {
+      namePart = namePart.substring('ic_outline_'.length);
+    } else if (namePart.startsWith('ic_basic_')) {
+      namePart = namePart.substring('ic_basic_'.length);
+    } else if (namePart.startsWith('ic_')) {
+      namePart = namePart.substring('ic_'.length);
+    }
+
+    const componentNameParts = namePart
+      .split(/[_-]/) // 언더스코어(_) 또는 하이픈(-)으로 분리
+      .map((part) => {
+        if (!part) return '';
+        return part.charAt(0).toUpperCase() + part.slice(1).toLowerCase(); // 각 부분을 파스칼 케이스로
+      });
+
+    const baseName = componentNameParts.join('');
+
+    if (!baseName) {
+      return 'UnknownIcon';
+    }
+
+    return baseName; // 'Ic' 접두사 제거
+  }
+
   const j = api.jscodeshift;
   const root = j(file.source);
+  console.log(`[DEBUG] Processing file: ${file.path}`);
 
   let fileHasSkippedItems = false;
   const importedIconNamesFromNewPackage = new Set();
@@ -36,22 +45,37 @@ module.exports = function transformer(file, api) {
     'ListItem.SupportingIcon',
     'NavBar.Icon',
     'TextButton',
-    'Tooltip.Contents',
+    // 'Tooltip.Contents',
     'TopNavigation.IconButton',
-    'BottomNavItem' // 기존 BottomNavItem 포함
+    'BottomNavItem',
   ];
 
-  TARGET_COMPONENTS.forEach(componentName => {
+  TARGET_COMPONENTS.forEach((componentName) => {
+    console.log(`[DEBUG] Searching for ${componentName} in ${file.path}`);
     root.findJSXElements(componentName).forEach((path) => {
+      console.log(
+        `[DEBUG] Found ${componentName} at line: ${path.node.loc.start.line}`
+      );
       const { openingElement } = path.node;
       let iconPropValue = null;
       let isUnhandledIconProp = false;
       let originalIconAttributeNode = null;
 
-      const newAttributes = openingElement.attributes.filter(attr => {
+      const iconProp = path.node.openingElement.attributes.find(
+        (attr) => attr.name && attr.name.name === 'icon'
+      );
+
+      const newAttributes = openingElement.attributes.filter((attr) => {
         if (attr.type === 'JSXAttribute' && attr.name.name === 'icon') {
           originalIconAttributeNode = attr;
-          if (attr.value.type === 'StringLiteral') {
+          if (
+            iconProp &&
+            iconProp.value &&
+            iconProp.value.type === 'StringLiteral'
+          ) {
+            console.log(
+              `[DEBUG] Found icon prop with string literal: "${iconProp.value.value}"`
+            );
             iconPropValue = attr.value.value;
           } else if (
             attr.value.type === 'JSXExpressionContainer' &&
@@ -76,6 +100,9 @@ module.exports = function transformer(file, api) {
       if (originalIconAttributeNode) {
         if (!isUnhandledIconProp && typeof iconPropValue === 'string') {
           const newIconComponentName = getNewIconComponentName(iconPropValue);
+          console.log(
+            `[DEBUG] Generated new icon component name: ${newIconComponentName}`
+          );
           if (newIconComponentName !== 'UnknownIcon') {
             importedIconNamesFromNewPackage.add(newIconComponentName);
 
@@ -83,8 +110,15 @@ module.exports = function transformer(file, api) {
               j.jsxIdentifier('size'),
               j.jsxExpressionContainer(j.literal(20))
             );
+            console.log(
+              `[DEBUG] Attempting to replace ${componentName} with ${newIconComponentName}`
+            );
             const newIconJsxElement = j.jsxElement(
-              j.jsxOpeningElement(j.jsxIdentifier(newIconComponentName), [sizeAttribute], true)
+              j.jsxOpeningElement(
+                j.jsxIdentifier(newIconComponentName),
+                [sizeAttribute],
+                true
+              )
             );
             const newIconProp = j.jsxAttribute(
               j.jsxIdentifier('icon'),
@@ -92,8 +126,9 @@ module.exports = function transformer(file, api) {
             );
             newAttributes.push(newIconProp);
             openingElement.attributes = newAttributes;
-          } else { // UnknownIcon의 경우 원본 유지 및 경고
-             console.warn(
+          } else {
+            // UnknownIcon의 경우 원본 유지 및 경고
+            console.warn(
               `[SKIPPED] File: ${file.path} - Component <${componentName}> at line ${openingElement.loc.start.line} resulted in 'UnknownIcon' for icon value '${iconPropValue}'. Original prop retained.`
             );
             fileHasSkippedItems = true;
@@ -115,9 +150,11 @@ module.exports = function transformer(file, api) {
   });
 
   if (importedIconNamesFromNewPackage.size > 0) {
-    const newSpecificImportSpecifiers = Array.from(importedIconNamesFromNewPackage)
+    const newSpecificImportSpecifiers = Array.from(
+      importedIconNamesFromNewPackage
+    )
       .sort()
-      .map(name => j.importSpecifier(j.identifier(name)));
+      .map((name) => j.importSpecifier(j.identifier(name)));
 
     const newImportDeclaration = j.importDeclaration(
       newSpecificImportSpecifiers,
@@ -142,12 +179,14 @@ module.exports = function transformer(file, api) {
       programNode.comments = [];
     }
 
-    const alreadyHasFileLevelComment = programNode.comments.some(c =>
+    const alreadyHasFileLevelComment = programNode.comments.some((c) =>
       c.value.includes('icon-prop-codemod:')
     );
 
     if (!alreadyHasFileLevelComment) {
-      programNode.comments.unshift(j.commentLine(topLevelCommentText.substring(3)));
+      programNode.comments.unshift(
+        j.commentLine(topLevelCommentText.substring(3))
+      );
     }
   }
 

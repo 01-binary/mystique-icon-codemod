@@ -49,7 +49,30 @@ const argv = yargs(hideBin(process.argv))
       '../node_modules/.bin/jscodeshift'
     );
 
-    const args = ['-t', transformScriptPath, ...argv.paths];
+    // 사용자가 전달한 경로들을 해석할 기준 디렉토리를 결정합니다.
+    // npx는 process.cwd()를 변경할 수 있으므로, INIT_CWD를 우선적으로 확인합니다.
+    const invocationCwd = process.env.INIT_CWD || process.cwd();
+    console.log(chalk.magenta(`Effective CWD for path resolution: ${invocationCwd}`));
+    if (process.env.INIT_CWD) {
+      console.log(chalk.magenta(`(Using INIT_CWD: ${process.env.INIT_CWD})`));
+    } else {
+      console.log(chalk.magenta(`(Using process.cwd(): ${process.cwd()})`));
+    }
+
+    // 사용자가 전달한 경로들을 결정된 CWD 기준으로 절대 경로로 변환합니다.
+    const resolvedPaths = argv.paths.map((p) => {
+      const absolutePath = path.resolve(invocationCwd, p);
+      // 디버깅을 위해 변환된 경로를 로그로 출력할 수 있습니다.
+      console.log(
+        chalk.cyan(
+          `Input path: '${p}', Resolved to: '${absolutePath}' (using CWD: ${invocationCwd})`
+        )
+      );
+      return absolutePath;
+    });
+
+    // jscodeshift에 전달할 인자 배열 (변환된 절대 경로 사용)
+    const args = ['-t', transformScriptPath, ...resolvedPaths];
 
     if (argv.dryRun) {
       args.push('--dry');
