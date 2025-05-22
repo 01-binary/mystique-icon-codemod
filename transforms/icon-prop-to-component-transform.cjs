@@ -1,40 +1,29 @@
 module.exports = function transformer(file, api) {
-  // icon-prop-to-component-transform.cjs
+  // 아이콘 문자열을 PascalCase 컴포넌트 이름으로 변환하는 헬퍼 함수
+  // 예: 'ic_basic_outline_chevron_left' -> 'OutlineChevronLeft'
   function getNewIconComponentName(iconString) {
     if (!iconString || typeof iconString !== 'string') {
       return 'UnknownIcon'; // 또는 오류 처리
     }
     let namePart = iconString;
-    // 가장 긴/구체적인 접두사부터 순서대로 처리
-    if (namePart.startsWith('ic_basic_outline_')) {
-      namePart = namePart.substring('ic_basic_outline_'.length);
-    } else if (namePart.startsWith('ic_outline_')) {
-      namePart = namePart.substring('ic_outline_'.length);
-    } else if (namePart.startsWith('ic_basic_')) {
+    if (namePart.startsWith('ic_basic_')) {
       namePart = namePart.substring('ic_basic_'.length);
     } else if (namePart.startsWith('ic_')) {
+      // 'ic_basic_' 외의 'ic_' 접두사도 처리
       namePart = namePart.substring('ic_'.length);
     }
 
-    const componentNameParts = namePart
-      .split(/[_-]/) // 언더스코어(_) 또는 하이픈(-)으로 분리
+    return namePart
+      .split('_')
       .map((part) => {
         if (!part) return '';
-        return part.charAt(0).toUpperCase() + part.slice(1).toLowerCase(); // 각 부분을 파스칼 케이스로
-      });
-
-    const baseName = componentNameParts.join('');
-
-    if (!baseName) {
-      return 'UnknownIcon';
-    }
-
-    return baseName; // 'Ic' 접두사 제거
+        return part.charAt(0).toUpperCase() + part.slice(1);
+      })
+      .join('');
   }
 
   const j = api.jscodeshift;
   const root = j(file.source);
-  console.log(`[DEBUG] Processing file: ${file.path}`);
 
   let fileHasSkippedItems = false;
   const importedIconNamesFromNewPackage = new Set();
@@ -45,107 +34,219 @@ module.exports = function transformer(file, api) {
     'ListItem.SupportingIcon',
     'NavBar.Icon',
     'TextButton',
-    // 'Tooltip.Contents',
     'TopNavigation.IconButton',
     'BottomNavItem',
   ];
 
   TARGET_COMPONENTS.forEach((componentName) => {
-    console.log(`[DEBUG] Searching for ${componentName} in ${file.path}`);
-    root.findJSXElements(componentName).forEach((path) => {
+    let foundElements;
+    const parts = componentName.split('.');
+    if (parts.length === 2 && parts[0] && parts[1]) {
+      foundElements = root.find(j.JSXElement, {
+        openingElement: {
+          name: {
+            type: 'JSXMemberExpression',
+            object: { type: 'JSXIdentifier', name: parts[0] },
+            property: { type: 'JSXIdentifier', name: parts[1] },
+          },
+        },
+      });
+    } else {
       console.log(
-        `[DEBUG] Found ${componentName} at line: ${path.node.loc.start.line}`
+        `[DEBUG] Applying default replacement for simple component: ${componentName}`
       );
+      foundElements = root.findJSXElements(componentName);
+    }
+
+    foundElements.forEach((path) => {
       const { openingElement } = path.node;
       let iconPropValue = null;
       let isUnhandledIconProp = false;
-      let originalIconAttributeNode = null;
+      let iconAttributeNode = null; // path.node.openingElement.attributes에서 icon prop을 직접 참조
+      const attributesOtherThanIcon = [];
 
-      const iconProp = path.node.openingElement.attributes.find(
-        (attr) => attr.name && attr.name.name === 'icon'
-      );
+      openingElement.attributes.forEach((attr) => {
+        if (
+          attr.type === 'JSXAttribute' &&
+          attr.name &&
+          attr.name.name === 'icon'
+        ) {
+          iconAttributeNode = attr; // icon prop 노드 저장
+          const valueNode = attr.value;
+          let iconObjectAttributes = []; // Stores attributes from icon={{ key: val }}
 
-      const newAttributes = openingElement.attributes.filter((attr) => {
-        if (attr.type === 'JSXAttribute' && attr.name.name === 'icon') {
-          originalIconAttributeNode = attr;
-          if (
-            iconProp &&
-            iconProp.value &&
-            iconProp.value.type === 'StringLiteral'
-          ) {
-            console.log(
-              `[DEBUG] Found icon prop with string literal: "${iconProp.value.value}"`
-            );
-            iconPropValue = attr.value.value;
+          if (valueNode && valueNode.type === 'StringLiteral') {
+            iconPropValue = valueNode.value;
           } else if (
-            attr.value.type === 'JSXExpressionContainer' &&
-            attr.value.expression.type === 'StringLiteral'
+            valueNode &&
+            valueNode.type === 'JSXExpressionContainer' &&
+            valueNode.expression &&
+            valueNode.expression.type === 'ObjectExpression'
           ) {
-            iconPropValue = attr.value.expression.value;
-          } else if (
-            attr.value.type === 'JSXExpressionContainer' &&
-            attr.value.expression.type === 'TemplateLiteral' &&
-            attr.value.expression.quasis.length === 1 &&
-            attr.value.expression.expressions.length === 0
-          ) {
-            iconPropValue = attr.value.expression.quasis[0].value.cooked;
+            const properties = valueNode.expression.properties;
+            let foundIconStringInObject = false;
+            properties.forEach((prop) => {
+              if (prop.type === 'Property' && prop.key.type === 'Identifier') {
+                // AST for object properties is 'Property'
+                if (
+                  prop.key.name === 'icon' &&
+                  prop.value.type === 'StringLiteral'
+                ) {
+                  iconPropValue = prop.value.value;
+                  foundIconStringInObject = true;
+                } else {
+                  // Other props like color, size within the icon object
+                  let jsxValue;
+                  if (prop.value.type === 'StringLiteral') {
+                    jsxValue = j.stringLiteral(prop.value.value);
+                  } else {
+                    // For identifiers, member expressions etc. like szsColors.blue55
+                    jsxValue = j.jsxExpressionContainer(prop.value);
+                  }
+                  iconObjectAttributes.push(
+                    j.jsxAttribute(j.jsxIdentifier(prop.key.name), jsxValue)
+                  );
+                }
+              }
+            });
+            if (!foundIconStringInObject) {
+              console.log(
+                `[DEBUG] 'icon' key in icon object prop for ${componentName} at line ${path.node.loc.start.line} is missing or not a string literal.`
+              );
+              isUnhandledIconProp = true;
+            }
           } else {
+            console.log(
+              `[DEBUG] Unhandled icon prop type for ${componentName} at line ${path.node.loc.start.line}: ` +
+                (valueNode ? valueNode.type : 'undefined value')
+            );
             isUnhandledIconProp = true;
           }
-          return false;
+        } else {
+          attributesOtherThanIcon.push(attr);
         }
-        return true;
       });
 
-      if (originalIconAttributeNode) {
-        if (!isUnhandledIconProp && typeof iconPropValue === 'string') {
-          const newIconComponentName = getNewIconComponentName(iconPropValue);
-          console.log(
-            `[DEBUG] Generated new icon component name: ${newIconComponentName}`
-          );
-          if (newIconComponentName !== 'UnknownIcon') {
-            importedIconNamesFromNewPackage.add(newIconComponentName);
+      if (!iconAttributeNode) {
+        console.log(
+          `[DEBUG] No icon prop found for ${componentName} at line ${path.node.loc.start.line}`
+        );
+        return; // 다음 요소로
+      }
+      if (isUnhandledIconProp || iconPropValue === null) {
+        console.log(
+          `[DEBUG] Skipping ${componentName} at line ${path.node.loc.start.line} due to unhandled, missing, or invalid icon prop.`
+        );
+        fileHasSkippedItems = true;
+        return;
+      }
 
-            const sizeAttribute = j.jsxAttribute(
-              j.jsxIdentifier('size'),
-              j.jsxExpressionContainer(j.literal(20))
-            );
-            console.log(
-              `[DEBUG] Attempting to replace ${componentName} with ${newIconComponentName}`
-            );
-            const newIconJsxElement = j.jsxElement(
-              j.jsxOpeningElement(
-                j.jsxIdentifier(newIconComponentName),
-                [sizeAttribute],
-                true
-              )
-            );
-            const newIconProp = j.jsxAttribute(
-              j.jsxIdentifier('icon'),
-              j.jsxExpressionContainer(newIconJsxElement)
-            );
-            newAttributes.push(newIconProp);
-            openingElement.attributes = newAttributes;
-          } else {
-            // UnknownIcon의 경우 원본 유지 및 경고
-            console.warn(
-              `[SKIPPED] File: ${file.path} - Component <${componentName}> at line ${openingElement.loc.start.line} resulted in 'UnknownIcon' for icon value '${iconPropValue}'. Original prop retained.`
-            );
-            fileHasSkippedItems = true;
-            newAttributes.push(originalIconAttributeNode);
-            openingElement.attributes = newAttributes;
-          }
+      const newIconComponentName = getNewIconComponentName(iconPropValue);
+
+      if (newIconComponentName === 'UnknownIcon') {
+        console.log(
+          `[DEBUG] Skipping ${componentName} at line ${path.node.loc.start.line} due to 'UnknownIcon' generation for icon value '${iconPropValue}'.`
+        );
+        fileHasSkippedItems = true;
+        return;
+      }
+      importedIconNamesFromNewPackage.add(newIconComponentName);
+
+      // Unified logic to transform the 'icon' prop into a JSX element for all target components.
+      console.log(
+        `[DEBUG] Transforming icon prop for component: ${componentName} at line ${path.node.loc.start.line}`
+      );
+      const PROPS_TO_TRANSFER_TO_INNER_ICON = ['color'];
+      const attributesFromOuterComponentToTransfer = [];
+      const remainingAttributesForOuterComponent = [];
+
+      attributesOtherThanIcon.forEach((attr) => {
+        if (
+          attr.type === 'JSXAttribute' &&
+          attr.name &&
+          PROPS_TO_TRANSFER_TO_INNER_ICON.includes(attr.name.name)
+        ) {
+          attributesFromOuterComponentToTransfer.push(attr);
         } else {
-          console.warn(
-            `[SKIPPED] File: ${file.path} - Component <${componentName}> at line ${openingElement.loc.start.line} has a dynamic or unhandled 'icon' prop. Original prop retained.`
-          );
-          fileHasSkippedItems = true;
-          newAttributes.push(originalIconAttributeNode);
-          openingElement.attributes = newAttributes;
+          remainingAttributesForOuterComponent.push(attr);
+        }
+      });
+
+      // Start with props from icon={{...}} object, these have higher priority
+      let basePropsForInnerIcon = [...iconObjectAttributes];
+
+      // Add props from outer component (e.g. direct color prop) if not already defined in iconObjectAttributes
+      attributesFromOuterComponentToTransfer.forEach((attrToTransfer) => {
+        if (
+          !basePropsForInnerIcon.some(
+            (baseAttr) => baseAttr.name.name === attrToTransfer.name.name
+          )
+        ) {
+          basePropsForInnerIcon.push(attrToTransfer);
+        }
+      });
+
+      let innerIconElementProps = [...basePropsForInnerIcon];
+
+      // Size prop logic: 1. from iconObject/outerTransfer, 2. from remainingOuter, 3. default 20
+      let sizeAttributeForInnerIcon = innerIconElementProps.find(
+        (attr) => attr.name && attr.name.name === 'size'
+      );
+
+      if (!sizeAttributeForInnerIcon) {
+        const outerSizeAttribute = remainingAttributesForOuterComponent.find(
+          (attr) => attr.name && attr.name.name === 'size'
+        );
+        if (outerSizeAttribute) {
+          sizeAttributeForInnerIcon = outerSizeAttribute;
+          const idx =
+            remainingAttributesForOuterComponent.indexOf(outerSizeAttribute);
+          if (idx > -1) remainingAttributesForOuterComponent.splice(idx, 1); // Remove from outer if moved
+        }
+      }
+
+      if (sizeAttributeForInnerIcon) {
+        // Ensure size is only added once, even if found and pushed here
+        if (!innerIconElementProps.includes(sizeAttributeForInnerIcon)) {
+          innerIconElementProps.push(sizeAttributeForInnerIcon);
         }
       } else {
-        openingElement.attributes = newAttributes;
+        innerIconElementProps.push(
+          j.jsxAttribute(
+            j.jsxIdentifier('size'),
+            j.jsxExpressionContainer(j.literal(20))
+          )
+        );
       }
+
+      // Ensure props are unique in case 'color' (or other transferred props) were also in attributesOtherThanIcon
+      // For now, the logic correctly separates them, so direct sort is fine.
+      innerIconElementProps.sort((a, b) =>
+        a.name.name.localeCompare(b.name.name)
+      );
+
+      const innerIconOpeningElement = j.jsxOpeningElement(
+        j.jsxIdentifier(newIconComponentName),
+        innerIconElementProps,
+        true // selfClosing
+      );
+      const newInnerIconJsxElement = j.jsxElement(innerIconOpeningElement);
+      const newIconPropForOuter = j.jsxAttribute(
+        j.jsxIdentifier('icon'),
+        j.jsxExpressionContainer(newInnerIconJsxElement)
+      );
+
+      path.node.openingElement.attributes = [
+        newIconPropForOuter,
+        ...remainingAttributesForOuterComponent,
+      ].sort((a, b) => {
+        if (a.name.name === 'icon') return -1; // Keep 'icon' prop first for readability
+        if (b.name.name === 'icon') return 1;
+        return a.name.name.localeCompare(b.name.name);
+      });
+      console.log(
+        `[DEBUG] Successfully transformed icon prop for ${componentName} to use <${newIconComponentName} />`
+      );
     });
   });
 
