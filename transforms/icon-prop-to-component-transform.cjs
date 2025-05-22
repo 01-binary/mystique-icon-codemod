@@ -52,9 +52,6 @@ module.exports = function transformer(file, api) {
         },
       });
     } else {
-      console.log(
-        `[DEBUG] Applying default replacement for simple component: ${componentName}`
-      );
       foundElements = root.findJSXElements(componentName);
     }
 
@@ -110,16 +107,9 @@ module.exports = function transformer(file, api) {
               }
             });
             if (!foundIconStringInObject) {
-              console.log(
-                `[DEBUG] 'icon' key in icon object prop for ${componentName} at line ${path.node.loc.start.line} is missing or not a string literal.`
-              );
               isUnhandledIconProp = true;
             }
           } else {
-            console.log(
-              `[DEBUG] Unhandled icon prop type for ${componentName} at line ${path.node.loc.start.line}: ` +
-                (valueNode ? valueNode.type : 'undefined value')
-            );
             isUnhandledIconProp = true;
           }
         } else {
@@ -128,15 +118,9 @@ module.exports = function transformer(file, api) {
       });
 
       if (!iconAttributeNode) {
-        console.log(
-          `[DEBUG] No icon prop found for ${componentName} at line ${path.node.loc.start.line}`
-        );
         return; // 다음 요소로
       }
       if (isUnhandledIconProp || iconPropValue === null) {
-        console.log(
-          `[DEBUG] Skipping ${componentName} at line ${path.node.loc.start.line} due to unhandled, missing, or invalid icon prop.`
-        );
         fileHasSkippedItems = true;
         return;
       }
@@ -144,18 +128,12 @@ module.exports = function transformer(file, api) {
       const newIconComponentName = getNewIconComponentName(iconPropValue);
 
       if (newIconComponentName === 'UnknownIcon') {
-        console.log(
-          `[DEBUG] Skipping ${componentName} at line ${path.node.loc.start.line} due to 'UnknownIcon' generation for icon value '${iconPropValue}'.`
-        );
         fileHasSkippedItems = true;
         return;
       }
       importedIconNamesFromNewPackage.add(newIconComponentName);
 
       // Unified logic to transform the 'icon' prop into a JSX element for all target components.
-      console.log(
-        `[DEBUG] Transforming icon prop for component: ${componentName} at line ${path.node.loc.start.line}`
-      );
       const PROPS_TO_TRANSFER_TO_INNER_ICON = ['color'];
       const attributesFromOuterComponentToTransfer = [];
       const remainingAttributesForOuterComponent = [];
@@ -244,9 +222,6 @@ module.exports = function transformer(file, api) {
         if (b.name.name === 'icon') return 1;
         return a.name.name.localeCompare(b.name.name);
       });
-      console.log(
-        `[DEBUG] Successfully transformed icon prop for ${componentName} to use <${newIconComponentName} />`
-      );
     });
   });
 
