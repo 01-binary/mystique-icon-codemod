@@ -1,6 +1,12 @@
 module.exports = function transformer(file, api) {
   // 아이콘 문자열을 PascalCase 컴포넌트 이름으로 변환하는 헬퍼 함수
   // 예: 'ic_basic_outline_chevron_left' -> 'OutlineChevronLeft'
+  /**
+   * Converts an icon string (e.g., 'ic_basic_fill_info') into a PascalCase component name (e.g., 'Info').
+   * Handles various prefixes and ensures a default 'UnknownIcon' for invalid inputs.
+   * @param {string | null | undefined} iconString - The icon string to convert.
+   * @returns {string} The PascalCase component name, or 'UnknownIcon' if conversion fails or input is invalid.
+   */
   function getNewIconComponentName(iconString) {
     if (!iconString || typeof iconString !== 'string') {
       return 'UnknownIcon'; // 또는 오류 처리
@@ -13,13 +19,164 @@ module.exports = function transformer(file, api) {
       namePart = namePart.substring('ic_'.length);
     }
 
-    return namePart
-      .split('_')
+    const componentName = namePart
+      .split(/[_-]/)
       .map((part) => {
         if (!part) return '';
-        return part.charAt(0).toUpperCase() + part.slice(1);
+        return part.charAt(0).toUpperCase() + part.slice(1).toLowerCase();
       })
       .join('');
+    return componentName ? componentName : 'UnknownIcon'; // Ensure not empty
+  }
+
+  /**
+   * Extracts the full component name from a JSXElement AST node.
+   * For example, for <Button />, it returns 'Button'.
+   * For <ListItem.SupportingVisual />, it returns 'ListItem.SupportingVisual'.
+   * @param {import('jscodeshift').JSXElement} node - The JSXElement AST node.
+   * @returns {string} The component name, or 'UnknownComponent' if the name cannot be determined.
+   */
+  function getComponentName(node) {
+    if (!node || !node.openingElement || !node.openingElement.name)
+      return 'UnknownComponent';
+    const nameNode = node.openingElement.name;
+    if (nameNode.type === 'JSXIdentifier') {
+      return nameNode.name;
+    }
+    if (nameNode.type === 'JSXMemberExpression') {
+      let name = '';
+      let object = nameNode;
+      while (object.type === 'JSXMemberExpression') {
+        name = object.property.name + (name ? '.' + name : '');
+        object = object.object;
+      }
+      name = object.name + (name ? '.' + name : '');
+      return name;
+    }
+    return 'UnknownComponent';
+  }
+
+  /**
+   * Analyzes all attributes of a JSX component and categorizes them for icon transformation.
+   * It extracts the icon's string value, attributes from an icon object literal,
+   * direct color/size attributes, and any remaining attributes.
+   * @param {Array<import('jscodeshift').JSXAttribute | import('jscodeshift').JSXSpreadAttribute>} allAttributes - An array of attribute nodes from the component's opening element.
+   * @param {import('jscodeshift').JSCodeshift} j - The jscodeshift API object.
+   * @returns {{
+   *   iconPropValue: string | null,
+   *   iconObjectAttributes: Array<import('jscodeshift').JSXAttribute | import('jscodeshift').JSXSpreadAttribute>,
+   *   directAttributes: { color?: import('jscodeshift').JSXAttribute, size?: import('jscodeshift').JSXAttribute },
+   *   remainingAttributes: Array<import('jscodeshift').JSXAttribute | import('jscodeshift').JSXSpreadAttribute>,
+   *   isUnhandledIconProp: boolean,
+   *   iconAttributeNode: import('jscodeshift').JSXAttribute | null
+   * }} An object containing parsed attribute information.
+   * - `iconPropValue`: The string value of the icon (e.g., 'ic_home').
+   * - `iconObjectAttributes`: Attributes from an icon object literal (e.g., `icon={{ icon: 'foo', color: 'blue' }}`).
+   * - `directAttributes`: Direct 'color' and 'size' attributes from the outer component.
+   * - `remainingAttributes`: All other attributes from the outer component.
+   * - `isUnhandledIconProp`: True if the icon prop is in an unhandled format.
+   * - `iconAttributeNode`: The original JSXAttribute node for the 'icon' prop.
+   */
+  function parseComponentAttributes(allAttributes, j) {
+    let iconPropValue = null;
+    let isUnhandledIconProp = false;
+    let iconAttributeNode = null;
+    const iconObjectAttributes = []; // Attributes from inside icon={{ key: val }}
+    const directAttributes = {}; // Stores direct 'color', 'size' attributes from the outer component
+    const remainingAttributes = []; // All other attributes from the outer component
+
+    allAttributes.forEach((attr) => {
+      if (attr.type === 'JSXAttribute' && attr.name) {
+        const attrName = attr.name.name;
+        if (attrName === 'icon') {
+          iconAttributeNode = attr;
+          const valueNode = attr.value;
+          if (valueNode && valueNode.type === 'StringLiteral') {
+            iconPropValue = valueNode.value;
+          } else if (
+            valueNode &&
+            valueNode.type === 'JSXExpressionContainer' &&
+            valueNode.expression &&
+            valueNode.expression.type === 'ObjectExpression'
+          ) {
+            const properties = valueNode.expression.properties;
+            let foundIconStringInObject = false;
+            if (properties && properties.length > 0) {
+              properties.forEach((prop) => {
+                if (
+                  prop.type === 'ObjectProperty' &&
+                  prop.key &&
+                  prop.key.type === 'Identifier'
+                ) {
+                  if (
+                    prop.key.name === 'icon' &&
+                    prop.value.type === 'StringLiteral'
+                  ) {
+                    iconPropValue = prop.value.value;
+                    foundIconStringInObject = true;
+                  } else {
+                    // Other props like color, size within the icon object
+                    let jsxValue;
+                    if (prop.value.type === 'StringLiteral') {
+                      jsxValue = j.stringLiteral(prop.value.value);
+                    } else {
+                      // For identifiers, member expressions etc.
+                      jsxValue = j.jsxExpressionContainer(prop.value);
+                    }
+                    iconObjectAttributes.push(
+                      j.jsxAttribute(j.jsxIdentifier(prop.key.name), jsxValue)
+                    );
+                  }
+                } else if (prop.type === 'SpreadElement') {
+                  // Handle spread like {...iconProps}
+                  iconObjectAttributes.push(
+                    j.jsxSpreadAttribute(prop.argument)
+                  );
+                }
+              });
+              // If there are properties, but 'icon' string is not found (and not just spreads)
+              if (
+                !foundIconStringInObject &&
+                properties.some(
+                  (p) => p.type === 'ObjectProperty' && p.key.name === 'icon'
+                )
+              ) {
+                isUnhandledIconProp = true; // 'icon' key exists but not a string
+              } else if (
+                !foundIconStringInObject &&
+                !properties.some((p) => p.type === 'SpreadElement')
+              ) {
+                // No 'icon' key at all, and no spread that might provide it
+                isUnhandledIconProp = true;
+              }
+            } else {
+              // Empty object {} for icon prop
+              isUnhandledIconProp = true;
+            }
+          } else {
+            // e.g. icon={<SomeComponent />} or icon={variableNotObjectOrString}
+            isUnhandledIconProp = true;
+          }
+        } else if (attrName === 'color' || attrName === 'size') {
+          // Capture direct color/size
+          directAttributes[attrName] = attr;
+        } else {
+          remainingAttributes.push(attr);
+        }
+      } else {
+        // JSXSpreadAttribute or other types on the outer component
+        remainingAttributes.push(attr);
+      }
+    });
+
+    return {
+      iconPropValue,
+      iconObjectAttributes, // from icon={{ ... }}
+      directAttributes, // { color?: JSXAttr, size?: JSXAttr } from outer component's direct props
+      remainingAttributes, // other attributes from outer (already excludes icon, direct color, direct size)
+      isUnhandledIconProp,
+      iconAttributeNode,
+    };
   }
 
   const j = api.jscodeshift;
@@ -29,14 +186,16 @@ module.exports = function transformer(file, api) {
   const importedIconNamesFromNewPackage = new Set();
 
   const TARGET_COMPONENTS = [
-    // 'BasicCardHeader',
-    // 'CardHeader.Icon',
     'ListItem.SupportingIcon',
+    'CardHeader.Icon',
     'NavBar.Icon',
     'TextButton',
     'TopNavigation.IconButton',
     'BottomNavItem',
+    'BasicCardHeader', // Added BasicCardHeader
   ];
+
+  const PROPS_TO_TRANSFER_FROM_OUTER_TO_INNER = ['color']; // Configurable: props like 'color' to move from outer to inner icon
 
   TARGET_COMPONENTS.forEach((componentName) => {
     let foundElements;
@@ -56,148 +215,63 @@ module.exports = function transformer(file, api) {
     }
 
     foundElements.forEach((path) => {
-      const { openingElement } = path.node;
-      let iconPropValue = null;
-      let isUnhandledIconProp = false;
-      let iconAttributeNode = null; // path.node.openingElement.attributes에서 icon prop을 직접 참조
-      const attributesOtherThanIcon = [];
-      let iconObjectAttributes = []; // Stores attributes from icon={{ key: val }}
+      const currentComponentName = getComponentName(path.node);
+      const parsedProps = parseComponentAttributes(
+        path.node.openingElement.attributes,
+        j
+      );
 
-      openingElement.attributes.forEach((attr) => {
-        if (
-          attr.type === 'JSXAttribute' &&
-          attr.name &&
-          attr.name.name === 'icon'
-        ) {
-          iconAttributeNode = attr; // icon prop 노드 저장
-          const valueNode = attr.value;
-          // iconObjectAttributes is now declared at the top of foundElements.forEach scope
-
-          if (valueNode && valueNode.type === 'StringLiteral') {
-            iconPropValue = valueNode.value;
-          } else if (
-            valueNode &&
-            valueNode.type === 'JSXExpressionContainer' &&
-            valueNode.expression &&
-            valueNode.expression.type === 'ObjectExpression'
-          ) {
-            const properties = valueNode.expression.properties;
-            let foundIconStringInObject = false;
-            if (properties && properties.length > 0) {
-              properties.forEach((prop, index) => {
-                if (
-                  prop.type === 'ObjectProperty' && // Changed from 'Property'
-                  prop.key.type === 'Identifier'
-                ) {
-                  // AST for object properties is 'ObjectProperty'
-                  if (
-                    prop.key.name === 'icon' &&
-                    prop.value.type === 'StringLiteral'
-                  ) {
-                    iconPropValue = prop.value.value;
-                    foundIconStringInObject = true;
-                  } else {
-                    let jsxValue;
-                    if (prop.value.type === 'StringLiteral') {
-                      jsxValue = j.stringLiteral(prop.value.value);
-                    } else {
-                      // For identifiers, member expressions etc. like szsColors.blue55
-                      jsxValue = j.jsxExpressionContainer(prop.value);
-                    }
-                    iconObjectAttributes.push(
-                      j.jsxAttribute(j.jsxIdentifier(prop.key.name), jsxValue)
-                    );
-                  }
-                } else {
-                }
-              });
-
-              if (!foundIconStringInObject) {
-                isUnhandledIconProp = true;
-              }
-            } else {
-              isUnhandledIconProp = true; // If no props, icon is unhandled
-            }
-          } else {
-            isUnhandledIconProp = true;
-          }
-        } else {
-          attributesOtherThanIcon.push(attr);
-        }
-      });
-
-      if (!iconAttributeNode) {
-        return; // 다음 요소로
+      if (!parsedProps.iconAttributeNode) {
+        return; // No 'icon' prop, skip
       }
-      if (isUnhandledIconProp || iconPropValue === null) {
+
+      if (
+        parsedProps.isUnhandledIconProp ||
+        parsedProps.iconPropValue === null
+      ) {
         fileHasSkippedItems = true;
         return;
       }
 
-      const newIconComponentName = getNewIconComponentName(iconPropValue);
-
+      const newIconComponentName = getNewIconComponentName(
+        parsedProps.iconPropValue
+      );
       if (newIconComponentName === 'UnknownIcon') {
         fileHasSkippedItems = true;
         return;
       }
+
       importedIconNamesFromNewPackage.add(newIconComponentName);
 
-      // Unified logic to transform the 'icon' prop into a JSX element for all target components.
-      const PROPS_TO_TRANSFER_TO_INNER_ICON = ['color'];
-      const attributesFromOuterComponentToTransfer = [];
-      const remainingAttributesForOuterComponent = [];
+      // 1. Start with props from icon={{...}} object (highest priority)
+      let innerIconElementProps = [...parsedProps.iconObjectAttributes];
 
-      attributesOtherThanIcon.forEach((attr) => {
+      // 2. Add transferable props from outer component's directAttributes (e.g., direct 'color')
+      //    if not already defined by iconObjectAttributes.
+      PROPS_TO_TRANSFER_FROM_OUTER_TO_INNER.forEach((propName) => {
+        const directAttr = parsedProps.directAttributes[propName];
         if (
-          attr.type === 'JSXAttribute' &&
-          attr.name &&
-          PROPS_TO_TRANSFER_TO_INNER_ICON.includes(attr.name.name)
+          directAttr &&
+          !innerIconElementProps.some((p) => p.name && p.name.name === propName)
         ) {
-          attributesFromOuterComponentToTransfer.push(attr);
-        } else {
-          remainingAttributesForOuterComponent.push(attr);
+          innerIconElementProps.push(directAttr);
         }
       });
 
-      // Start with props from icon={{...}} object, these have higher priority
-      let basePropsForInnerIcon = [...iconObjectAttributes];
-
-      // Add props from outer component (e.g. direct color prop) if not already defined in iconObjectAttributes
-      attributesFromOuterComponentToTransfer.forEach((attrToTransfer) => {
-        if (
-          !basePropsForInnerIcon.some(
-            (baseAttr) => baseAttr.name.name === attrToTransfer.name.name
-          )
-        ) {
-          basePropsForInnerIcon.push(attrToTransfer);
-        }
-      });
-
-      let innerIconElementProps = [...basePropsForInnerIcon];
-
-      // Size prop logic: 1. from iconObject/outerTransfer, 2. from remainingOuter, 3. default 20
-      let sizeAttributeForInnerIcon = innerIconElementProps.find(
-        (attr) => attr.name && attr.name.name === 'size'
+      // 3. Size prop logic:
+      //    a. Check if 'size' is already in innerIconElementProps (from iconObjectAttributes or transferred directAttributes if 'size' was transferable)
+      let sizeAttrForInnerIcon = innerIconElementProps.find(
+        (p) => p.name && p.name.name === 'size'
       );
 
-      if (!sizeAttributeForInnerIcon) {
-        const outerSizeAttribute = remainingAttributesForOuterComponent.find(
-          (attr) => attr.name && attr.name.name === 'size'
-        );
-        if (outerSizeAttribute) {
-          sizeAttributeForInnerIcon = outerSizeAttribute;
-          const idx =
-            remainingAttributesForOuterComponent.indexOf(outerSizeAttribute);
-          if (idx > -1) remainingAttributesForOuterComponent.splice(idx, 1); // Remove from outer if moved
-        }
+      //    b. If not found, check direct 'size' from outer component (parsedProps.directAttributes.size)
+      if (!sizeAttrForInnerIcon && parsedProps.directAttributes.size) {
+        sizeAttrForInnerIcon = parsedProps.directAttributes.size;
+        innerIconElementProps.push(sizeAttrForInnerIcon);
       }
 
-      if (sizeAttributeForInnerIcon) {
-        // Ensure size is only added once, even if found and pushed here
-        if (!innerIconElementProps.includes(sizeAttributeForInnerIcon)) {
-          innerIconElementProps.push(sizeAttributeForInnerIcon);
-        }
-      } else {
+      //    c. If still not found, add default size={20}
+      if (!sizeAttrForInnerIcon) {
         innerIconElementProps.push(
           j.jsxAttribute(
             j.jsxIdentifier('size'),
@@ -206,31 +280,45 @@ module.exports = function transformer(file, api) {
         );
       }
 
-      // Ensure props are unique in case 'color' (or other transferred props) were also in attributesOtherThanIcon
-      // For now, the logic correctly separates them, so direct sort is fine.
-      innerIconElementProps.sort((a, b) =>
-        a.name.name.localeCompare(b.name.name)
+      innerIconElementProps = innerIconElementProps.filter(Boolean); // Clean up any potential null/undefined from complex spreads
+
+      const newIconElementNode = j.jsxElement(
+        j.jsxOpeningElement(
+          j.jsxIdentifier(newIconComponentName),
+          innerIconElementProps,
+          true
+        ) // Self-closing
       );
 
-      const innerIconOpeningElement = j.jsxOpeningElement(
-        j.jsxIdentifier(newIconComponentName),
-        innerIconElementProps,
-        true // selfClosing
-      );
-      const newInnerIconJsxElement = j.jsxElement(innerIconOpeningElement);
-      const newIconPropForOuter = j.jsxAttribute(
-        j.jsxIdentifier('icon'),
-        j.jsxExpressionContainer(newInnerIconJsxElement)
+      // Construct final attributes for the outer component
+      let finalOuterAttributes = [...parsedProps.remainingAttributes];
+      finalOuterAttributes.push(
+        j.jsxAttribute(
+          j.jsxIdentifier('icon'),
+          j.jsxExpressionContainer(newIconElementNode)
+        )
       );
 
-      path.node.openingElement.attributes = [
-        newIconPropForOuter,
-        ...remainingAttributesForOuterComponent,
-      ].sort((a, b) => {
-        if (a.name.name === 'icon') return -1; // Keep 'icon' prop first for readability
-        if (b.name.name === 'icon') return 1;
-        return a.name.name.localeCompare(b.name.name);
-      });
+      // Add back direct 'color' or 'size' if they existed on outer component but were NOT used for the inner icon
+      // (because iconObjectAttributes took precedence or they weren't designated for transfer for 'color').
+      if (parsedProps.directAttributes.color) {
+        const colorWasUsedForInner = innerIconElementProps.includes(
+          parsedProps.directAttributes.color
+        );
+        if (!colorWasUsedForInner) {
+          finalOuterAttributes.push(parsedProps.directAttributes.color);
+        }
+      }
+      if (parsedProps.directAttributes.size) {
+        const sizeWasUsedForInner = innerIconElementProps.includes(
+          parsedProps.directAttributes.size
+        );
+        if (!sizeWasUsedForInner) {
+          finalOuterAttributes.push(parsedProps.directAttributes.size);
+        }
+      }
+
+      path.node.openingElement.attributes = finalOuterAttributes;
     });
   });
 
