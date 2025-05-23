@@ -182,7 +182,8 @@ module.exports = function transformer(file, api) {
   const j = api.jscodeshift;
   const root = j(file.source);
 
-  let fileHasSkippedItems = false;
+  let fileHasSkippedItems = false; // Tracks if any item was skipped for logging purposes
+  let trulyProblematicSkipOccurred = false; // Tracks if a skip occurred that requires manual review
   const importedIconNamesFromNewPackage = new Set();
 
   const TARGET_COMPONENTS = [
@@ -196,6 +197,14 @@ module.exports = function transformer(file, api) {
   ];
 
   const PROPS_TO_TRANSFER_FROM_OUTER_TO_INNER = ['color']; // Configurable: props like 'color' to move from outer to inner icon
+
+  const COMPONENTS_THAT_DO_NOT_NEED_DEFAULT_SIZE_PROP_FOR_INNER_ICON = new Set([
+    'BasicCardHeader',
+    'CardHeader.Icon',
+    'ListItem.SupportingIcon',
+    'NavBar.Icon',
+    'TopNavigation.IconButton',
+  ]);
 
   TARGET_COMPONENTS.forEach((componentName) => {
     let foundElements;
@@ -229,8 +238,29 @@ module.exports = function transformer(file, api) {
         parsedProps.isUnhandledIconProp ||
         parsedProps.iconPropValue === null
       ) {
-        fileHasSkippedItems = true;
-        return;
+        fileHasSkippedItems = true; // Mark that a skip occurred for general logging
+
+        let isProblem = true; // Assume it's a problem unless proven otherwise
+        if (
+          parsedProps.isUnhandledIconProp &&
+          parsedProps.iconAttributeNode &&
+          parsedProps.iconAttributeNode.value &&
+          parsedProps.iconAttributeNode.value.type ===
+            'JSXExpressionContainer' &&
+          parsedProps.iconAttributeNode.value.expression &&
+          parsedProps.iconAttributeNode.value.expression.type === 'JSXElement'
+        ) {
+          // If the 'unhandled' prop is already a JSX element, it's not a "problem" for TODO comment purposes.
+          isProblem = false;
+        }
+
+        if (isProblem) {
+          trulyProblematicSkipOccurred = true;
+          // console.warn(`[SKIPPED - REVIEW NEEDED] Unhandled icon prop or null value in ${currentComponentName} (Line ${path.node.loc.start.line}):`, j(parsedProps.iconAttributeNode).toSource());
+        } else {
+          // console.log(`[INFO] Skipped transformation for ${currentComponentName} (Line ${path.node.loc.start.line}) because icon prop is already a JSX element.`);
+        }
+        return; // Skip transformation for this element
       }
 
       const newIconComponentName = getNewIconComponentName(
@@ -238,6 +268,8 @@ module.exports = function transformer(file, api) {
       );
       if (newIconComponentName === 'UnknownIcon') {
         fileHasSkippedItems = true;
+        trulyProblematicSkipOccurred = true; // This is definitely a problem requiring review
+        // console.warn(`[SKIPPED - REVIEW NEEDED] Could not determine icon name for ${currentComponentName} (Line ${path.node.loc.start.line}): iconValue='${parsedProps.iconPropValue}'`, j(parsedProps.iconAttributeNode).toSource());
         return;
       }
 
@@ -259,26 +291,30 @@ module.exports = function transformer(file, api) {
       });
 
       // 3. Size prop logic:
-      //    a. Check if 'size' is already in innerIconElementProps (from iconObjectAttributes or transferred directAttributes if 'size' was transferable)
-      let sizeAttrForInnerIcon = innerIconElementProps.find(
-        (p) => p.name && p.name.name === 'size'
-      );
+      //    a. Check if 'size' is already in innerIconElementProps (i.e., from iconObjectAttributes).
+      const sizeProvidedByIconObject = innerIconElementProps.some(p => p.name && p.name.name === 'size');
 
-      //    b. If not found, check direct 'size' from outer component (parsedProps.directAttributes.size)
-      if (!sizeAttrForInnerIcon && parsedProps.directAttributes.size) {
-        sizeAttrForInnerIcon = parsedProps.directAttributes.size;
-        innerIconElementProps.push(sizeAttrForInnerIcon);
+      if (!sizeProvidedByIconObject) {
+        // b. If not from iconObjectAttributes, check direct 'size' from outer component.
+        if (parsedProps.directAttributes.size) {
+          // Use the direct 'size' from the outer component.
+          innerIconElementProps.push(parsedProps.directAttributes.size);
+        } else {
+          // c. If NO explicit size is found (neither in iconObject nor direct):
+          //    Apply default size logic based on the component.
+          if (!COMPONENTS_THAT_DO_NOT_NEED_DEFAULT_SIZE_PROP_FOR_INNER_ICON.has(currentComponentName)) {
+            // This component is NOT in the special list, so apply global default size.
+            innerIconElementProps.push(
+              j.jsxAttribute(
+                j.jsxIdentifier('size'),
+                j.jsxExpressionContainer(j.literal(20)) // Global default
+              )
+            );
+          }
+          // If currentComponentName IS in the set, no size prop is added to the inner icon by default.
+        }
       }
-
-      //    c. If still not found, add default size={20}
-      if (!sizeAttrForInnerIcon) {
-        innerIconElementProps.push(
-          j.jsxAttribute(
-            j.jsxIdentifier('size'),
-            j.jsxExpressionContainer(j.literal(20))
-          )
-        );
-      }
+      // If sizeProvidedByIconObject was true, it means iconObjectAttributes.size is used, and no further action for size is needed.
 
       innerIconElementProps = innerIconElementProps.filter(Boolean); // Clean up any potential null/undefined from complex spreads
 
@@ -344,24 +380,25 @@ module.exports = function transformer(file, api) {
     body.splice(lastImportIndex + 1, 0, newImportDeclaration);
   }
 
-  // if (fileHasSkippedItems) {
-  //   const topLevelCommentText = `// TODO: icon-prop-codemod: This file contains components with 'icon' props that were skipped during transformation or resulted in 'UnknownIcon', and require manual review. Please search for '[SKIPPED]' in your console logs for details.`;
-  //   const programNode = root.find(j.Program).get(0).node;
+  if (trulyProblematicSkipOccurred) {
+    // Only add TODO if a genuinely problematic skip occurred
+    const topLevelCommentText = `// TODO: icon-prop-codemod: This file contains components with 'icon' props that were skipped during transformation or resulted in 'UnknownIcon', and require manual review. Please search for '[SKIPPED]' in your console logs for details.`;
+    const programNode = root.find(j.Program).get(0).node;
 
-  //   if (!programNode.comments) {
-  //     programNode.comments = [];
-  //   }
+    if (!programNode.comments) {
+      programNode.comments = [];
+    }
 
-  //   const alreadyHasFileLevelComment = programNode.comments.some((c) =>
-  //     c.value.includes('icon-prop-codemod:')
-  //   );
+    const alreadyHasFileLevelComment = programNode.comments.some((c) =>
+      c.value.includes('icon-prop-codemod:')
+    );
 
-  //   if (!alreadyHasFileLevelComment) {
-  //     programNode.comments.unshift(
-  //       j.commentLine(topLevelCommentText.substring(3))
-  //     );
-  //   }
-  // }
+    if (!alreadyHasFileLevelComment) {
+      programNode.comments.unshift(
+        j.commentLine(topLevelCommentText.substring(3))
+      );
+    }
+  }
 
   return root.toSource({ quote: 'single', trailingComma: true });
 };
