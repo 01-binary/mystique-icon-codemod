@@ -29,8 +29,8 @@ module.exports = function transformer(file, api) {
   const importedIconNamesFromNewPackage = new Set();
 
   const TARGET_COMPONENTS = [
-    'BasicCardHeader',
-    'CardHeader.Icon',
+    // 'BasicCardHeader',
+    // 'CardHeader.Icon',
     'ListItem.SupportingIcon',
     'NavBar.Icon',
     'TextButton',
@@ -61,6 +61,7 @@ module.exports = function transformer(file, api) {
       let isUnhandledIconProp = false;
       let iconAttributeNode = null; // path.node.openingElement.attributes에서 icon prop을 직접 참조
       const attributesOtherThanIcon = [];
+      let iconObjectAttributes = []; // Stores attributes from icon={{ key: val }}
 
       openingElement.attributes.forEach((attr) => {
         if (
@@ -70,7 +71,7 @@ module.exports = function transformer(file, api) {
         ) {
           iconAttributeNode = attr; // icon prop 노드 저장
           const valueNode = attr.value;
-          let iconObjectAttributes = []; // Stores attributes from icon={{ key: val }}
+          // iconObjectAttributes is now declared at the top of foundElements.forEach scope
 
           if (valueNode && valueNode.type === 'StringLiteral') {
             iconPropValue = valueNode.value;
@@ -82,32 +83,40 @@ module.exports = function transformer(file, api) {
           ) {
             const properties = valueNode.expression.properties;
             let foundIconStringInObject = false;
-            properties.forEach((prop) => {
-              if (prop.type === 'Property' && prop.key.type === 'Identifier') {
-                // AST for object properties is 'Property'
+            if (properties && properties.length > 0) {
+              properties.forEach((prop, index) => {
                 if (
-                  prop.key.name === 'icon' &&
-                  prop.value.type === 'StringLiteral'
+                  prop.type === 'ObjectProperty' && // Changed from 'Property'
+                  prop.key.type === 'Identifier'
                 ) {
-                  iconPropValue = prop.value.value;
-                  foundIconStringInObject = true;
-                } else {
-                  // Other props like color, size within the icon object
-                  let jsxValue;
-                  if (prop.value.type === 'StringLiteral') {
-                    jsxValue = j.stringLiteral(prop.value.value);
+                  // AST for object properties is 'ObjectProperty'
+                  if (
+                    prop.key.name === 'icon' &&
+                    prop.value.type === 'StringLiteral'
+                  ) {
+                    iconPropValue = prop.value.value;
+                    foundIconStringInObject = true;
                   } else {
-                    // For identifiers, member expressions etc. like szsColors.blue55
-                    jsxValue = j.jsxExpressionContainer(prop.value);
+                    let jsxValue;
+                    if (prop.value.type === 'StringLiteral') {
+                      jsxValue = j.stringLiteral(prop.value.value);
+                    } else {
+                      // For identifiers, member expressions etc. like szsColors.blue55
+                      jsxValue = j.jsxExpressionContainer(prop.value);
+                    }
+                    iconObjectAttributes.push(
+                      j.jsxAttribute(j.jsxIdentifier(prop.key.name), jsxValue)
+                    );
                   }
-                  iconObjectAttributes.push(
-                    j.jsxAttribute(j.jsxIdentifier(prop.key.name), jsxValue)
-                  );
+                } else {
                 }
+              });
+
+              if (!foundIconStringInObject) {
+                isUnhandledIconProp = true;
               }
-            });
-            if (!foundIconStringInObject) {
-              isUnhandledIconProp = true;
+            } else {
+              isUnhandledIconProp = true; // If no props, icon is unhandled
             }
           } else {
             isUnhandledIconProp = true;
