@@ -192,7 +192,7 @@ module.exports = function transformer(file, api) {
     'TextButton',
     'TopNavigation.IconButton',
     'BottomNavItem',
-    'BasicCardHeader', // Added BasicCardHeader
+    'BasicCardHeader',
   ];
 
   const PROPS_TO_TRANSFER_FROM_OUTER_TO_INNER = ['color']; // Configurable: props like 'color' to move from outer to inner icon
@@ -344,24 +344,24 @@ module.exports = function transformer(file, api) {
     body.splice(lastImportIndex + 1, 0, newImportDeclaration);
   }
 
-  if (fileHasSkippedItems) {
-    const topLevelCommentText = `// TODO: icon-prop-codemod: This file contains components with 'icon' props that were skipped during transformation or resulted in 'UnknownIcon', and require manual review. Please search for '[SKIPPED]' in your console logs for details.`;
-    const programNode = root.find(j.Program).get(0).node;
+  // if (fileHasSkippedItems) {
+  //   const topLevelCommentText = `// TODO: icon-prop-codemod: This file contains components with 'icon' props that were skipped during transformation or resulted in 'UnknownIcon', and require manual review. Please search for '[SKIPPED]' in your console logs for details.`;
+  //   const programNode = root.find(j.Program).get(0).node;
 
-    if (!programNode.comments) {
-      programNode.comments = [];
-    }
+  //   if (!programNode.comments) {
+  //     programNode.comments = [];
+  //   }
 
-    const alreadyHasFileLevelComment = programNode.comments.some((c) =>
-      c.value.includes('icon-prop-codemod:')
-    );
+  //   const alreadyHasFileLevelComment = programNode.comments.some((c) =>
+  //     c.value.includes('icon-prop-codemod:')
+  //   );
 
-    if (!alreadyHasFileLevelComment) {
-      programNode.comments.unshift(
-        j.commentLine(topLevelCommentText.substring(3))
-      );
-    }
-  }
+  //   if (!alreadyHasFileLevelComment) {
+  //     programNode.comments.unshift(
+  //       j.commentLine(topLevelCommentText.substring(3))
+  //     );
+  //   }
+  // }
 
   return root.toSource({ quote: 'single', trailingComma: true });
 };
