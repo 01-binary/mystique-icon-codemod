@@ -202,6 +202,7 @@ module.exports = function transformer(file, api) {
     'BasicCardHeader',
     'CardHeader.Icon',
     'ListItem.SupportingIcon',
+    'TextButton',
     'NavBar.Icon',
     'TopNavigation.IconButton',
   ]);
@@ -225,163 +226,261 @@ module.exports = function transformer(file, api) {
 
     foundElements.forEach((path) => {
       const currentComponentName = getComponentName(path.node);
-      const parsedProps = parseComponentAttributes(
-        path.node.openingElement.attributes,
-        j
-      );
+      if (currentComponentName === 'TextButton') {
+        const finalAttributesForTextButton = [];
+        let hasModifiedIconProp = false;
 
-      if (!parsedProps.iconAttributeNode) {
-        return; // No 'icon' prop, skip
-      }
+        path.node.openingElement.attributes.forEach((attr) => {
+          if (
+            attr.type === 'JSXAttribute' &&
+            attr.name &&
+            (attr.name.name === 'prefixIcon' || attr.name.name === 'suffixIcon')
+          ) {
+            const iconPropName = attr.name.name;
+            let iconValue = null;
+            let isAlreadyJsx = false;
 
-      if (
-        parsedProps.isUnhandledIconProp ||
-        parsedProps.iconPropValue === null
-      ) {
-        fileHasSkippedItems = true; // Mark that a skip occurred for general logging
+            if (attr.value && attr.value.type === 'StringLiteral') {
+              iconValue = attr.value.value;
+            } else if (
+              attr.value &&
+              attr.value.type === 'JSXExpressionContainer' &&
+              attr.value.expression &&
+              attr.value.expression.type === 'JSXElement'
+            ) {
+              // Already a JSX element, keep as is
+              isAlreadyJsx = true;
+              finalAttributesForTextButton.push(attr);
+            } else {
+              // Unhandled type for prefixIcon/suffixIcon value (e.g., variable, complex expression)
+              fileHasSkippedItems = true;
+              trulyProblematicSkipOccurred = true;
+              // console.warn(`[SKIPPED - REVIEW NEEDED] Unhandled ${iconPropName} prop in ${currentComponentName} (Line ${path.node.loc.start.line}):`, j(attr).toSource());
+              finalAttributesForTextButton.push(attr); // Keep original unhandled prop
+            }
 
-        let isProblem = true; // Assume it's a problem unless proven otherwise
-        if (
-          parsedProps.isUnhandledIconProp &&
-          parsedProps.iconAttributeNode &&
-          parsedProps.iconAttributeNode.value &&
-          parsedProps.iconAttributeNode.value.type ===
-            'JSXExpressionContainer' &&
-          parsedProps.iconAttributeNode.value.expression &&
-          parsedProps.iconAttributeNode.value.expression.type === 'JSXElement'
-        ) {
-          // If the 'unhandled' prop is already a JSX element, it's not a "problem" for TODO comment purposes.
-          isProblem = false;
-        }
-
-        if (isProblem) {
-          trulyProblematicSkipOccurred = true;
-          // console.warn(`[SKIPPED - REVIEW NEEDED] Unhandled icon prop or null value in ${currentComponentName} (Line ${path.node.loc.start.line}):`, j(parsedProps.iconAttributeNode).toSource());
-        } else {
-          // console.log(`[INFO] Skipped transformation for ${currentComponentName} (Line ${path.node.loc.start.line}) because icon prop is already a JSX element.`);
-        }
-        return; // Skip transformation for this element
-      }
-
-      const newIconComponentName = getNewIconComponentName(
-        parsedProps.iconPropValue
-      );
-      if (newIconComponentName === 'UnknownIcon') {
-        fileHasSkippedItems = true;
-        trulyProblematicSkipOccurred = true; // This is definitely a problem requiring review
-        // console.warn(`[SKIPPED - REVIEW NEEDED] Could not determine icon name for ${currentComponentName} (Line ${path.node.loc.start.line}): iconValue='${parsedProps.iconPropValue}'`, j(parsedProps.iconAttributeNode).toSource());
-        return;
-      }
-
-      importedIconNamesFromNewPackage.add(newIconComponentName);
-
-      // 1. Start with props from icon={{...}} object (highest priority)
-      let innerIconElementProps = [...parsedProps.iconObjectAttributes];
-
-      // 2. Add transferable props from outer component's directAttributes (e.g., direct 'color')
-      //    if not already defined by iconObjectAttributes.
-      PROPS_TO_TRANSFER_FROM_OUTER_TO_INNER.forEach((propName) => {
-        const directAttr = parsedProps.directAttributes[propName];
-        if (
-          directAttr &&
-          !innerIconElementProps.some((p) => p.name && p.name.name === propName)
-        ) {
-          innerIconElementProps.push(directAttr);
-        }
-      });
-
-      // 3. Size prop logic:
-      //    a. Check if 'size' is already in innerIconElementProps (i.e., from iconObjectAttributes).
-      const sizeProvidedByIconObject = innerIconElementProps.some(p => p.name && p.name.name === 'size');
-
-      if (!sizeProvidedByIconObject) {
-        // b. If not from iconObjectAttributes, check direct 'size' from outer component.
-        if (parsedProps.directAttributes.size) {
-          // Use the direct 'size' from the outer component.
-          innerIconElementProps.push(parsedProps.directAttributes.size);
-        } else {
-          // c. If NO explicit size is found (neither in iconObject nor direct):
-          //    Apply default size logic based on the component.
-          if (!COMPONENTS_THAT_DO_NOT_NEED_DEFAULT_SIZE_PROP_FOR_INNER_ICON.has(currentComponentName)) {
-            // This component is NOT in the special list, so apply global default size.
-            innerIconElementProps.push(
-              j.jsxAttribute(
-                j.jsxIdentifier('size'),
-                j.jsxExpressionContainer(j.literal(20)) // Global default
-              )
-            );
+            if (iconValue) {
+              // It was a string, needs conversion
+              const newIconCompName = getNewIconComponentName(iconValue);
+              if (newIconCompName === 'UnknownIcon') {
+                fileHasSkippedItems = true;
+                trulyProblematicSkipOccurred = true;
+                // console.warn(`[SKIPPED - REVIEW NEEDED] Could not determine icon name for ${iconPropName} in ${currentComponentName} (Line ${path.node.loc.start.line}): iconValue='${iconValue}'`, j(attr).toSource());
+                finalAttributesForTextButton.push(attr); // Keep original prop if icon name is unknown
+              } else {
+                importedIconNamesFromNewPackage.add(newIconCompName);
+                const newJsxIconElement = j.jsxElement(
+                  j.jsxOpeningElement(
+                    j.jsxIdentifier(newIconCompName),
+                    [],
+                    true
+                  ) // Self-closing, no props for inner icon
+                );
+                finalAttributesForTextButton.push(
+                  j.jsxAttribute(
+                    j.jsxIdentifier(iconPropName),
+                    j.jsxExpressionContainer(newJsxIconElement)
+                  )
+                );
+                hasModifiedIconProp = true;
+              }
+            } else if (
+              !isAlreadyJsx &&
+              !finalAttributesForTextButton.includes(attr)
+            ) {
+              // If it wasn't a string, wasn't JSX, and wasn't already pushed due to being unhandled, push original.
+              // This case might be redundant if all non-string/non-JSX are considered 'unhandled'.
+              finalAttributesForTextButton.push(attr);
+            }
+          } else {
+            finalAttributesForTextButton.push(attr); // Keep other props as they are
           }
-          // If currentComponentName IS in the set, no size prop is added to the inner icon by default.
+        });
+        if (
+          hasModifiedIconProp ||
+          finalAttributesForTextButton.length !==
+            path.node.openingElement.attributes.length
+        ) {
+          path.node.openingElement.attributes = finalAttributesForTextButton;
         }
-      }
-      // If sizeProvidedByIconObject was true, it means iconObjectAttributes.size is used, and no further action for size is needed.
-
-      innerIconElementProps = innerIconElementProps.filter(Boolean); // Clean up any potential null/undefined from complex spreads
-
-      const newIconElementNode = j.jsxElement(
-        j.jsxOpeningElement(
-          j.jsxIdentifier(newIconComponentName),
-          innerIconElementProps,
-          true
-        ) // Self-closing
-      );
-
-      // Construct final attributes for the outer component
-      let finalOuterAttributes = [...parsedProps.remainingAttributes];
-      finalOuterAttributes.push(
-        j.jsxAttribute(
-          j.jsxIdentifier('icon'),
-          j.jsxExpressionContainer(newIconElementNode)
-        )
-      );
-
-      // Add back direct 'color' or 'size' if they existed on outer component but were NOT used for the inner icon
-      // (because iconObjectAttributes took precedence or they weren't designated for transfer for 'color').
-      if (parsedProps.directAttributes.color) {
-        const colorWasUsedForInner = innerIconElementProps.includes(
-          parsedProps.directAttributes.color
+      } else {
+        // Existing logic for other components (icon prop)
+        const parsedProps = parseComponentAttributes(
+          path.node.openingElement.attributes,
+          j
         );
-        if (!colorWasUsedForInner) {
-          finalOuterAttributes.push(parsedProps.directAttributes.color);
-        }
-      }
-      if (parsedProps.directAttributes.size) {
-        const sizeWasUsedForInner = innerIconElementProps.includes(
-          parsedProps.directAttributes.size
-        );
-        if (!sizeWasUsedForInner) {
-          finalOuterAttributes.push(parsedProps.directAttributes.size);
-        }
-      }
 
-      path.node.openingElement.attributes = finalOuterAttributes;
+        if (!parsedProps.iconAttributeNode) {
+          return; // No 'icon' prop, skip
+        }
+
+        if (
+          parsedProps.isUnhandledIconProp ||
+          parsedProps.iconPropValue === null
+        ) {
+          fileHasSkippedItems = true; // Mark that a skip occurred for general logging
+
+          let isProblem = true; // Assume it's a problem unless proven otherwise
+          if (
+            parsedProps.isUnhandledIconProp &&
+            parsedProps.iconAttributeNode &&
+            parsedProps.iconAttributeNode.value &&
+            parsedProps.iconAttributeNode.value.type ===
+              'JSXExpressionContainer' &&
+            parsedProps.iconAttributeNode.value.expression &&
+            parsedProps.iconAttributeNode.value.expression.type === 'JSXElement'
+          ) {
+            isProblem = false;
+          }
+
+          if (isProblem) {
+            trulyProblematicSkipOccurred = true;
+            // console.warn(`[SKIPPED - REVIEW NEEDED] Unhandled icon prop or null value in ${currentComponentName} (Line ${path.node.loc.start.line}):`, j(parsedProps.iconAttributeNode).toSource());
+          } else {
+            // console.log(`[INFO] Skipped transformation for ${currentComponentName} (Line ${path.node.loc.start.line}) because icon prop is already a JSX element.`);
+          }
+          return; // Skip transformation for this element
+        }
+
+        const newIconComponentName = getNewIconComponentName(
+          parsedProps.iconPropValue
+        );
+        if (newIconComponentName === 'UnknownIcon') {
+          fileHasSkippedItems = true;
+          trulyProblematicSkipOccurred = true; // This is definitely a problem requiring review
+          // console.warn(`[SKIPPED - REVIEW NEEDED] Could not determine icon name for ${currentComponentName} (Line ${path.node.loc.start.line}): iconValue='${parsedProps.iconPropValue}'`, j(parsedProps.iconAttributeNode).toSource());
+          return;
+        }
+
+        importedIconNamesFromNewPackage.add(newIconComponentName);
+
+        let innerIconElementProps = [...parsedProps.iconObjectAttributes];
+
+        PROPS_TO_TRANSFER_FROM_OUTER_TO_INNER.forEach((propName) => {
+          const directAttr = parsedProps.directAttributes[propName];
+          if (
+            directAttr &&
+            !innerIconElementProps.some(
+              (p) => p.name && p.name.name === propName
+            )
+          ) {
+            innerIconElementProps.push(directAttr);
+          }
+        });
+
+        const sizeProvidedByIconObject = innerIconElementProps.some(
+          (p) => p.name && p.name.name === 'size'
+        );
+
+        if (!sizeProvidedByIconObject) {
+          if (parsedProps.directAttributes.size) {
+            innerIconElementProps.push(parsedProps.directAttributes.size);
+          } else {
+            if (
+              !COMPONENTS_THAT_DO_NOT_NEED_DEFAULT_SIZE_PROP_FOR_INNER_ICON.has(
+                currentComponentName
+              )
+            ) {
+              innerIconElementProps.push(
+                j.jsxAttribute(
+                  j.jsxIdentifier('size'),
+                  j.jsxExpressionContainer(j.literal(20))
+                )
+              );
+            }
+          }
+        }
+
+        innerIconElementProps = innerIconElementProps.filter(Boolean);
+
+        const newIconElementNode = j.jsxElement(
+          j.jsxOpeningElement(
+            j.jsxIdentifier(newIconComponentName),
+            innerIconElementProps,
+            true
+          )
+        );
+
+        let finalOuterAttributes = [...parsedProps.remainingAttributes];
+        finalOuterAttributes.push(
+          j.jsxAttribute(
+            j.jsxIdentifier('icon'),
+            j.jsxExpressionContainer(newIconElementNode)
+          )
+        );
+
+        if (parsedProps.directAttributes.color) {
+          const colorWasUsedForInner = innerIconElementProps.includes(
+            parsedProps.directAttributes.color
+          );
+          if (!colorWasUsedForInner) {
+            finalOuterAttributes.push(parsedProps.directAttributes.color);
+          }
+        }
+        if (parsedProps.directAttributes.size) {
+          const sizeWasUsedForInner = innerIconElementProps.includes(
+            parsedProps.directAttributes.size
+          );
+          if (!sizeWasUsedForInner) {
+            finalOuterAttributes.push(parsedProps.directAttributes.size);
+          }
+        }
+
+        path.node.openingElement.attributes = finalOuterAttributes;
+      }
     });
   });
 
+  // Handle imports for @3o3/mystique-icons
   if (importedIconNamesFromNewPackage.size > 0) {
-    const newSpecificImportSpecifiers = Array.from(
-      importedIconNamesFromNewPackage
-    )
-      .sort()
-      .map((name) => j.importSpecifier(j.identifier(name)));
+    const mystiqueIconsPath = '@3o3/mystique-icons';
+    const existingMystiqueImport = root.find(j.ImportDeclaration, {
+      source: { value: mystiqueIconsPath },
+    });
 
-    const newImportDeclaration = j.importDeclaration(
-      newSpecificImportSpecifiers,
-      j.literal('@3o3/mystique-icons')
-    );
+    const newIconNamesArray = Array.from(importedIconNamesFromNewPackage);
 
-    const body = root.get().node.program.body;
-    let lastImportIndex = -1;
-    for (let i = 0; i < body.length; i++) {
-      if (body[i].type === 'ImportDeclaration') {
-        lastImportIndex = i;
+    if (existingMystiqueImport.size() > 0) {
+      const importDeclarationToUpdate = existingMystiqueImport.get(0).node;
+      const existingSpecifiers = importDeclarationToUpdate.specifiers || [];
+
+      const existingSpecifierNames = new Set(
+        existingSpecifiers.map((spec) => spec.imported.name)
+      );
+
+      newIconNamesArray.forEach((newName) => {
+        existingSpecifierNames.add(newName); // Add new names, Set handles duplicates
+      });
+
+      const allSpecifierNamesSorted = Array.from(existingSpecifierNames).sort();
+
+      importDeclarationToUpdate.specifiers = allSpecifierNamesSorted.map(
+        (name) => j.importSpecifier(j.identifier(name))
+      );
+    } else {
+      // No existing import from '@3o3/mystique-icons', create a new one.
+      const newSpecificImportSpecifiers = newIconNamesArray
+        .sort()
+        .map((name) => j.importSpecifier(j.identifier(name)));
+
+      const newImportDeclaration = j.importDeclaration(
+        newSpecificImportSpecifiers,
+        j.literal('@3o3/mystique-icons')
+      );
+
+      const body = root.get().node.program.body;
+      let lastImportIndex = -1;
+      for (let i = 0; i < body.length; i++) {
+        if (body[i].type === 'ImportDeclaration') {
+          lastImportIndex = i;
+        }
       }
+      body.splice(lastImportIndex + 1, 0, newImportDeclaration);
     }
-    body.splice(lastImportIndex + 1, 0, newImportDeclaration);
   }
 
+  // Add top-level TODO comment if necessary
   if (trulyProblematicSkipOccurred) {
-    // Only add TODO if a genuinely problematic skip occurred
     const topLevelCommentText = `// TODO: icon-prop-codemod: This file contains components with 'icon' props that were skipped during transformation or resulted in 'UnknownIcon', and require manual review. Please search for '[SKIPPED]' in your console logs for details.`;
     const programNode = root.find(j.Program).get(0).node;
 
@@ -395,7 +494,7 @@ module.exports = function transformer(file, api) {
 
     if (!alreadyHasFileLevelComment) {
       programNode.comments.unshift(
-        j.commentLine(topLevelCommentText.substring(3))
+        j.commentLine(topLevelCommentText.substring(3)) // Remove '// '
       );
     }
   }
